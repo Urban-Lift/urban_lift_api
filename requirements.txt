@@ -1,0 +1,7 @@
+fastapi[standard]
+supabase
+python-dotenv
+bcrypt
+pyjwt
+pydantic
+python-multipart
