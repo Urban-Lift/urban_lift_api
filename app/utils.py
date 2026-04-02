@@ -5,8 +5,6 @@ from phonenumbers.phonenumberutil import NumberParseException
 
 load_dotenv()
 
-def generate_verification_code(length: int = 6):
-    return '.join(secrets.choice(string.digits) for _ in range(length))'
 
 def is_valid_ghana_number(phone_number: str):
     try:
