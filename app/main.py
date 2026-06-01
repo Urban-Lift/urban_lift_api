@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from routes.auth import users_router
 from routes.admin import admin_router
+from routes.rides import ride_router
 
 app = FastAPI(
     title="A CARPOOLING API",
@@ -15,3 +16,4 @@ def home():
 
 app.include_router(users_router)
 app.include_router(admin_router)
+app.include_router(ride_router)
