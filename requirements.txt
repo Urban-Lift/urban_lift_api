@@ -6,3 +6,5 @@ pyjwt
 pydantic
 python-multipart
 phonenumbers
+filetype
+gotrue
