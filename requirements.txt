@@ -1,4 +1,5 @@
 fastapi[standard]
+uvicorn[standard]
 supabase
 python-dotenv
 bcrypt
