@@ -6,20 +6,20 @@ from fastapi import (
     UploadFile,
     File,
     Depends,
-    Header,
 )
-from typing import Annotated, cast
-from enum import Enum
+from typing import Annotated
 from supabase_auth import User
-from app.db.config import supabase, create_client
+from app.db.config import supabase
 from app.admin_client import supabase, supabase_admin
 from pydantic import EmailStr
-from app.utils import is_valid_ghana_number, validate_file
+from app.utils import is_valid_ghana_number
 from app.dependecies.authz import has_role
 from app.dependecies.authn import get_current_user
 import os
 import re
-from urllib.parse import quote
+from app.routes.rides import RideModel
+from app.routes.auth import UserRole
+from datetime import date
 
 drivers_router = APIRouter(tags=["Drivers"])
 
@@ -29,7 +29,42 @@ bucket = os.getenv("SUPABASE_BUCKET")
 anon_key = os.getenv("SUPABASE_ANON_KEY")
 
 
-
+@drivers_router.post("/drivers/ride/create", dependencies=[Depends(has_role(["driver"]))])
+def create_ride(
+    ride: Annotated[RideModel, Form()],
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    ride_data = {
+        "driver_id": current_user.id,
+        "pickup_location": ride.pickup_location,
+        "dropoff_location": ride.dropoff_location,
+        "departure_date": ride.departure_date.isoformat(),
+        "departure_time": ride.departure_time.isoformat(),
+        "available_seats": ride.available_seats,
+        "price_per_seat": ride.price_per_seat,
+        "trip_type": ride.trip_type.value,
+        "trip_status": ride.trip_status.value,
+        "pickup_lat": ride.pickup_lat,
+        "pickup_lng": ride.pickup_lng,
+        "dropoff_lat": ride.dropoff_lat,
+        "dropoff_lng": ride.dropoff_lng,
+    }
+    try:
+        if ride.role != UserRole.DRIVER:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only drivers can create rides")   
+        if ride.price_per_seat <= 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Price per seat must be greater than zero")
+        if ride.available_seats <= 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Available seats must be greater than zero")
+        if ride.pickup_lat <= 0 or ride.pickup_lng <= 0 or ride.dropoff_lat <= 0 or ride.dropoff_lng <= 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid coordinates provided")
+        if ride.departure_date < date.today():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Departure date cannot be in the past")
+        
+        supabase.table("rides").insert(ride_data).execute()
+        return {"message": "Ride created successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create ride: {str(e)}")
 
 
 @drivers_router.post(
