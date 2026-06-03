@@ -12,7 +12,7 @@ from typing import Annotated, cast
 from enum import Enum
 from supabase_auth import User
 from app.db.config import supabase, create_client
-from admin_client import supabase, supabase_admin
+from app.admin_client import supabase, supabase_admin
 from pydantic import EmailStr
 from app.utils import is_valid_ghana_number, validate_file
 from app.dependecies.authz import has_role
