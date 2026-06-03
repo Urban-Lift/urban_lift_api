@@ -11,12 +11,12 @@ from fastapi import (
 from typing import Annotated, cast
 from enum import Enum
 from supabase_auth import User
-from db.config import supabase, create_client
+from app.db.config import supabase, create_client
 from admin_client import supabase, supabase_admin
 from pydantic import EmailStr
-from utils import is_valid_ghana_number, validate_file
-from dependecies.authz import has_role
-from dependecies.authn import get_current_user
+from app.utils import is_valid_ghana_number, validate_file
+from app.dependecies.authz import has_role
+from app.dependecies.authn import get_current_user
 import os
 import re
 from urllib.parse import quote

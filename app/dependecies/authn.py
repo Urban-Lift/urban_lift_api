@@ -2,7 +2,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from supabase_auth import User
-from db.config import supabase
+from app.db.config import supabase
 import re
 
 

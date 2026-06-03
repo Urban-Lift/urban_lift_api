@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Form
 from fastapi import HTTPException, status, Depends
 from typing import Annotated
-from db.config import supabase
-from dependecies.authz import has_role
-from dependecies.authn import get_current_user
+from app.db.config import supabase
+from app.dependecies.authz import has_role
+from app.dependecies.authn import get_current_user
 
 
 admin_router = APIRouter(tags=["Admin"])
