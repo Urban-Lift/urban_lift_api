@@ -11,8 +11,7 @@ from enum import Enum
 import os
 import httpx
 from twilio.rest import Client as TwilioClient
-from app.db.config import supabase
-from app.admin_client import supabase
+from app.admin_client import supabase_admin as supabase
 from app.dependecies.authz import has_role
 from app.dependecies.authn import get_current_user
 from supabase_auth import User
@@ -135,11 +134,11 @@ async def book_ride(
             raise HTTPException(status_code=400, detail="No route found")
 
     route = route_data["routes"][0]
-    distance_km = round(route["distance"] / 1000, 2)
-    duration_min = round(route["duration"] / 60, 2)
+    distance_km = round(route["distance"] / 1000)
+    duration_min = round(route["duration"] / 60)
 
     # Calculate total price based on price per seat
-    total_price = ride_data["price_per_seat"] * seats_booked
+    total_price = round(ride_data["price_per_seat"] * seats_booked, 2)
 
     # Create booking
     booking_data = {
@@ -210,6 +209,8 @@ def review_trip(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Ride not found"
         )
+    
+    print(ride)
 
     review_data = {
         "ride_id": ride_id,

@@ -7,8 +7,7 @@ import os
 import json
 import httpx
 import anthropic
-from app.db.config import supabase
-from app.admin_client import supabase
+from app.admin_client import supabase_admin as supabase
 from app.dependecies.authz import has_role
 from app.dependecies.authn import get_current_user
 from supabase_auth import User
@@ -33,7 +32,6 @@ class TripStatus(str, Enum):
     cancelled = "cancelled"
 
 class RideModel(BaseModel):
-    role: UserRole
     pickup_location: str
     dropoff_location: str
     pickup_lat: float
@@ -338,7 +336,7 @@ async def match_rides(
 
 A passenger is looking for a ride with these preferences:
 - Pickup: {pickup_location}
-- Dropoff: {dropoff_location}
+- Dropoff: {dropoff_location} #traffic mangmt, query web on radius: alchemy for orm: put together a list of all the remaining task left
 - Date: {departure_date.isoformat()}
 - Preferred time: {departure_time.isoformat()}
 - Seats needed: {seats_needed}

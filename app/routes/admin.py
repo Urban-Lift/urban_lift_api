@@ -25,7 +25,7 @@ def get_registrations():
 )
 async def approve_registration(
     approved: Annotated[bool, Form()],
-    registration_id: Annotated[str, Form()]
+    registration_id: Annotated[int, Form()]
 ):
     try:
         supabase.table("driver_car_registration").update({"approved": approved}).eq(
