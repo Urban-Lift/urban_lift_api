@@ -375,3 +375,124 @@ def delete_payment_method(
     return {"message": "Payment method deleted successfully"}
 
 
+@passenger_router.post(
+    "/passenger/saved-routes", dependencies=[Depends(has_role(["passenger"]))]
+)
+def add_saved_route(
+    current_user: Annotated[User, Depends(get_current_user)],
+    route_name: Annotated[str, Form()],
+    pickup_location: Annotated[str, Form()],
+    dropoff_location: Annotated[str, Form()],
+    pickup_lat: Annotated[float, Form()],
+    pickup_lng: Annotated[float, Form()],
+    dropoff_lat: Annotated[float, Form()],
+    dropoff_lng: Annotated[float, Form()],
+):
+    route_data = {
+        "user_id": current_user.id,
+        "route_name": route_name,
+        "pickup_location": pickup_location,
+        "dropoff_location": dropoff_location,
+        "pickup_lat": pickup_lat,
+        "pickup_lng": pickup_lng,
+        "dropoff_lat": dropoff_lat,
+        "dropoff_lng": dropoff_lng,
+    }
+    supabase.table("saved_routes").insert(route_data).execute()
+    return {"message": "Route saved successfully"}
+
+
+@passenger_router.get(
+    "/passenger/saved-routes", dependencies=[Depends(has_role(["passenger"]))]
+)
+def get_saved_routes(
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    routes = (
+        supabase.table("saved_routes")
+        .select("*")
+        .eq("user_id", current_user.id)
+        .execute()
+    )
+    return {"saved_routes": routes.data}
+
+
+@passenger_router.patch(
+    "/passenger/saved-routes/{route_id}", dependencies=[Depends(has_role(["passenger"]))]
+)
+def update_saved_route(
+    current_user: Annotated[User, Depends(get_current_user)],
+    route_id: int,
+    route_name: Annotated[str | None, Form()] = None,
+    pickup_location: Annotated[str | None, Form()] = None,
+    dropoff_location: Annotated[str | None, Form()] = None,
+    pickup_lat: Annotated[float | None, Form()] = None,
+    pickup_lng: Annotated[float | None, Form()] = None,
+    dropoff_lat: Annotated[float | None, Form()] = None,
+    dropoff_lng: Annotated[float | None, Form()] = None,
+):
+    # Verify ownership
+    route = (
+        supabase.table("saved_routes")
+        .select("*")
+        .eq("id", route_id)
+        .eq("user_id", current_user.id)
+        .execute()
+    )
+    if not route.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Saved route not found",
+        )
+
+    update_data = {}
+    if route_name is not None:
+        update_data["route_name"] = route_name
+    if pickup_location is not None:
+        update_data["pickup_location"] = pickup_location
+    if dropoff_location is not None:
+        update_data["dropoff_location"] = dropoff_location
+    if pickup_lat is not None:
+        update_data["pickup_lat"] = pickup_lat
+    if pickup_lng is not None:
+        update_data["pickup_lng"] = pickup_lng
+    if dropoff_lat is not None:
+        update_data["dropoff_lat"] = dropoff_lat
+    if dropoff_lng is not None:
+        update_data["dropoff_lng"] = dropoff_lng
+
+    if not update_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No fields to update",
+        )
+
+    supabase.table("saved_routes").update(update_data).eq("id", route_id).execute()
+    return {"message": "Route updated successfully"}
+
+
+@passenger_router.delete(
+    "/passenger/saved-routes/{route_id}", dependencies=[Depends(has_role(["passenger"]))]
+)
+def delete_saved_route(
+    current_user: Annotated[User, Depends(get_current_user)],
+    route_id: int,
+):
+    # Verify ownership
+    route = (
+        supabase.table("saved_routes")
+        .select("*")
+        .eq("id", route_id)
+        .eq("user_id", current_user.id)
+        .execute()
+    )
+    if not route.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Saved route not found",
+        )
+
+    supabase.table("saved_routes").delete().eq("id", route_id).execute()
+    return {"message": "Route deleted successfully"}
+
+

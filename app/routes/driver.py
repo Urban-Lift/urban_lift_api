@@ -7,7 +7,7 @@ from fastapi import (
     File,
     Depends,
 )
-from typing import Annotated,List
+from typing import Annotated, Any, List, cast
 from supabase_auth import User
 from app.admin_client import supabase_admin as supabase, supabase_admin
 from pydantic import EmailStr
@@ -18,7 +18,7 @@ import os
 import re
 from app.routes.rides import RideModel
 from app.routes.auth import UserRole
-from datetime import date
+from datetime import date, timedelta
 
 drivers_router = APIRouter(tags=["Drivers"])
 
@@ -333,5 +333,97 @@ async def driver_car_registration(
         raise HTTPException(
             status_code=500, detail=f"Database update failed: {str(db_err)}"
         )
+
+
+@drivers_router.get(
+    "/drivers/earnings", dependencies=[Depends(has_role(["driver"]))]
+)
+def get_earnings_dashboard(
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    driver_id = current_user.id
+    today = date.today()
+    week_start = today - timedelta(days=today.weekday())
+    month_start = today.replace(day=1)
+
+    # Get all completed rides for this driver
+    completed_rides = (
+        supabase.table("rides")
+        .select("id, departure_date")
+        .eq("driver_id", driver_id)
+        .eq("trip_status", "completed")
+        .execute()
+    )
+
+    rides_data = cast(list[dict[str, Any]], completed_rides.data or [])
+    ride_ids = [r["id"] for r in rides_data]
+
+    if not ride_ids:
+        return {
+            "total_earnings": 0.0,
+            "today_earnings": 0.0,
+            "week_earnings": 0.0,
+            "month_earnings": 0.0,
+            "total_rides": 0,
+            "today_rides": 0,
+            "week_rides": 0,
+            "month_rides": 0,
+        }
+
+    # Get all completed bookings for those rides
+    bookings = (
+        supabase.table("bookings")
+        .select("total_price, ride_id, status")
+        .in_("ride_id", ride_ids)
+        .eq("status", "completed")
+        .execute()
+    )
+
+    bookings_data = cast(list[dict[str, Any]], bookings.data or [])
+
+    # Build a map of ride_id -> departure_date
+    ride_dates: dict[int, str] = {}
+    for ride in rides_data:
+        ride_dates[ride["id"]] = ride["departure_date"]
+
+    total_earnings = 0.0
+    today_earnings = 0.0
+    week_earnings = 0.0
+    month_earnings = 0.0
+    today_rides: set[int] = set()
+    week_rides: set[int] = set()
+    month_rides: set[int] = set()
+
+    for booking in bookings_data:
+        price = float(booking.get("total_price", 0) or 0)
+        ride_id = booking["ride_id"]
+        ride_date_str = ride_dates.get(ride_id)
+        if not ride_date_str:
+            continue
+
+        ride_date = date.fromisoformat(ride_date_str)
+
+        total_earnings += price
+
+        if ride_date == today:
+            today_earnings += price
+            today_rides.add(ride_id)
+        if ride_date >= week_start:
+            week_earnings += price
+            week_rides.add(ride_id)
+        if ride_date >= month_start:
+            month_earnings += price
+            month_rides.add(ride_id)
+
+    return {
+        "total_earnings": round(total_earnings, 2),
+        "today_earnings": round(today_earnings, 2),
+        "week_earnings": round(week_earnings, 2),
+        "month_earnings": round(month_earnings, 2),
+        "total_rides": len(ride_ids),
+        "today_rides": len(today_rides),
+        "week_rides": len(week_rides),
+        "month_rides": len(month_rides),
+    }
 
 

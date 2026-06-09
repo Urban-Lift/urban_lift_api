@@ -5,6 +5,7 @@ from app.routes.admin import admin_router
 from app.routes.rides import ride_router
 from app.routes.driver import drivers_router
 from app.routes.passenger import passenger_router
+from app.routes.community import community_router
 
 app = FastAPI(
     title="A CARPOOLING API",
@@ -36,3 +37,4 @@ app.include_router(drivers_router)
 app.include_router(passenger_router)
 app.include_router(ride_router)
 app.include_router(admin_router)
+app.include_router(community_router)
