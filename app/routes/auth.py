@@ -243,6 +243,8 @@ async def edit_profile(
                 status.HTTP_400_BAD_REQUEST, "Invalid Ghana phone number!"
             )
 
+        user_profile_update["emergency_number"] = emergency_number
+
     user_id = current_user.id
     if email is not None:
         if email != current_user.email:

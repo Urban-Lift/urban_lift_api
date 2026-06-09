@@ -6,7 +6,7 @@ from enum import Enum
 import os
 import json
 import httpx
-import anthropic
+from openai import OpenAI
 from app.admin_client import supabase_admin as supabase
 from app.dependecies.authz import has_role
 from app.dependecies.authn import get_current_user
@@ -20,6 +20,15 @@ ride_router = APIRouter(tags=["Rides"])
 
 base_url = "https://nominatim.openstreetmap.org"
 app_header = {"User-Agent": "UrbanLiftAPI/1.0"}
+
+def format_phone_e164(phone: str, country_code: str = "+233") -> str:
+    """Convert a local Ghana phone number to E.164 format for Twilio."""
+    phone = phone.strip()
+    if phone.startswith("+"):
+        return phone
+    if phone.startswith("0"):
+        phone = phone[1:]
+    return f"{country_code}{phone}"
 
 class TripType(str, Enum):
     one_way = "one_way"
@@ -158,17 +167,39 @@ def send_sos(
     current_user: Annotated[User, Depends(get_current_user)],
     booking_id: int,
 ):
-    # Verify booking belongs to the user
+    # Verify booking exists and user is either the passenger or the driver
     booking = (
         supabase.table("bookings")
         .select("*")
         .eq("id", booking_id)
-        .eq("passenger_id", current_user.id)
         .execute()
     )
     if not booking.data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found"
+        )
+
+    booking_data = cast(dict[str, Any], booking.data[0])
+
+    # Get the ride to find the driver
+    ride = (
+        supabase.table("rides")
+        .select("driver_id")
+        .eq("id", booking_data["ride_id"])
+        .execute()
+    )
+    if not ride.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Ride not found"
+        )
+
+    ride_data = cast(dict[str, Any], ride.data[0])
+    driver_id = ride_data["driver_id"]
+
+    # Ensure the current user is either the passenger or the driver of this ride
+    if current_user.id != booking_data["passenger_id"] and current_user.id != driver_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this alerting"
         )
 
     # Get the user's profile to find emergency number
@@ -191,19 +222,31 @@ def send_sos(
             detail="No emergency number saved in profile",
         )
 
-    booking_data = cast(dict[str, Any], booking.data[0])
+    # Get the driver's emergency contact
+    driver_profile = (
+        supabase.table("users")
+        .select("emergency_number, full_name")
+        .eq("auth_id", driver_id)
+        .execute()
+    )
+    driver_emergency_number = None
+    driver_name = "the driver"
+    if driver_profile.data:
+        driver_profile_data = cast(dict[str, Any], driver_profile.data[0])
+        driver_emergency_number = driver_profile_data.get("emergency_number")
+        driver_name = driver_profile_data.get("full_name", "the driver")
 
     # Create SOS record
-    passenger_name = profile_data.get("full_name", "A passenger")
+    sender_name = profile_data.get("full_name", "A user")
     pickup = booking_data.get("pickup_location", "unknown")
     dropoff = booking_data.get("dropoff_location", "unknown")
 
     sos_data = {
         "booking_id": booking_id,
-        "passenger_id": current_user.id,
+        "sender_id": booking_data["passenger_id"],
         "emergency_number": emergency_number,
         "ride_id": booking_data["ride_id"],
-        "passenger_name": passenger_name,
+        "sender_name": sender_name,
         "pickup_location": pickup,
         "dropoff_location": dropoff,
     }
@@ -219,26 +262,99 @@ def send_sos(
 
     sms_body = (
         f"🚨 SOS ALERT from UrbanLift!\n"
-        f"{passenger_name} needs help during their ride.\n"
+        f"{sender_name} needs help during their ride.\n"
         f"Pickup: {pickup}\n"
         f"Dropoff: {dropoff}\n"
         f"Please check on them immediately."
     )
 
+    sos_recipient = os.getenv("SOS_RECIPIENT_NUMBER")
+    formatted_emergency = sos_recipient if sos_recipient else format_phone_e164(emergency_number)
     try:
         twilio_client = TwilioClient(twilio_sid, twilio_token)
+        # Send to the sender's emergency contact
         twilio_client.messages.create(
             body=sms_body,
             from_=twilio_phone,
-            to=emergency_number,
+            to=formatted_emergency,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send SOS SMS: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send SOS SMS to {formatted_emergency} (from: {twilio_phone}, sos_env: {sos_recipient}, raw: {emergency_number}): {str(e)}",
+        )
+
+    # Also send to the driver's emergency contact (non-fatal if it fails)
+    # Skip if SOS_RECIPIENT_NUMBER is set (both would go to the same test number)
+    sender_emergency_notified = False
+    if not sos_recipient and driver_emergency_number and driver_emergency_number != emergency_number:
+        driver_sms = (
+            f"🚨 SOS ALERT from UrbanLift!\n"
+            f"An SOS was triggered during {driver_name}'s ride.\n"
+            f"Pickup: {pickup}\n"
+            f"Dropoff: {dropoff}\n"
+            f"Please check on them immediately."
+        )
+        try:
+            twilio_client.messages.create(
+                body=driver_sms,
+                from_=twilio_phone,
+                to=format_phone_e164(driver_emergency_number),
+            )
+            sender_emergency_notified = True
+        except Exception:
+            pass
 
     return {
         "message": "SOS alert sent successfully",
         "emergency_number": emergency_number,
+        "sender_emergency_notified": sender_emergency_notified,
     }
+
+
+@ride_router.get(
+    "/rides/history", dependencies=[Depends(has_role(["passenger", "driver"]))]
+)
+def get_ride_history(
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    user_id = current_user.id
+
+    # Get user's role
+    user_profile = (
+        supabase.table("users")
+        .select("role")
+        .eq("auth_id", user_id)
+        .execute()
+    )
+    if not user_profile.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User profile not found"
+        )
+
+    role = cast(dict[str, Any], user_profile.data[0]).get("role")
+
+    if role == "driver":
+        # Get completed rides the driver created
+        rides = (
+            supabase.table("rides")
+            .select("*")
+            .eq("driver_id", user_id)
+            .eq("trip_status", "completed")
+            .execute()
+        )
+        return {"role": "driver", "completed_rides": rides.data}
+    else:
+        # Get completed bookings for the passenger
+        bookings = (
+            supabase.table("bookings")
+            .select("*, rides(*)")
+            .eq("passenger_id", user_id)
+            .eq("status", "completed")
+            .execute()
+        )
+        return {"role": "passenger", "completed_rides": bookings.data}
+
 
 @ride_router.post("/geocode")
 async def geocode_address(
@@ -305,7 +421,6 @@ async def get_distance(
             "geometry": route.get("geometry"),
         }
     
-
 @ride_router.post("/ride/match", dependencies=[Depends(has_role(["passenger"]))])
 async def match_rides(
     current_user: Annotated[User, Depends(get_current_user)],
@@ -313,9 +428,15 @@ async def match_rides(
     dropoff_location: Annotated[str, Form()],
     departure_date: Annotated[date, Form()],
     departure_time: Annotated[time, Form()],
-    seats_needed: Annotated[int, Form()] = 1,
+    seats_needed: Annotated[int, Form()],
     max_price: Annotated[float | None, Form()] = None,
 ):
+    if departure_date != date.today():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ride matching is only available for today's date.",
+        )
+
     # Fetch available rides
     query = (
         supabase.table("rides")
@@ -329,58 +450,61 @@ async def match_rides(
     if not rides.data:
         return {"matches": [], "explanation": "No available rides found for that date."}
 
-    # Build context for Claude
+    # Build context for Grok
     rides_json = json.dumps(rides.data, default=str)
 
     prompt = f"""You are a ride-matching assistant for UrbanLift, a carpooling app in Ghana.
 
-A passenger is looking for a ride with these preferences:
-- Pickup: {pickup_location}
-- Dropoff: {dropoff_location} #traffic mangmt, query web on radius: alchemy for orm: put together a list of all the remaining task left
-- Date: {departure_date.isoformat()}
-- Preferred time: {departure_time.isoformat()}
-- Seats needed: {seats_needed}
-- Max price per seat: {max_price if max_price else "no limit"}
+    A passenger is looking for a ride with these preferences:
+    - Pickup: {pickup_location}
+    - Dropoff: {dropoff_location}
+    - Date: {departure_date.isoformat()}
+    - Preferred time: {departure_time.isoformat()}
+    - Seats needed: {seats_needed}
+    - Max price per seat: {max_price if max_price else "no limit"}
 
-Here are the available rides:
-{rides_json}
+    Here are the available rides:
+    {rides_json}
 
-Rank the rides from best to worst match considering:
-1. Proximity of pickup/dropoff locations (name similarity and coordinates)
-2. Time closeness to preferred departure time
-3. Price per seat (lower is better, respect max_price if set)
-4. Available seats meeting the requirement
+    Search for current traffic conditions in the areas around the pickup and dropoff locations (within a reasonable radius). Factor traffic congestion, road closures, and travel time estimates into your ranking.
 
-Return a JSON object with this exact structure:
-{{
-  "matches": [
+    Rank the rides from best to worst match considering:
+    1. Proximity of pickup/dropoff locations (name similarity and coordinates)
+    2. Real-time traffic conditions and estimated travel time in the pickup/dropoff radius
+    3. Time closeness to preferred departure time
+    4. Price per seat (lower is better, respect max_price if set)
+    5. Available seats meeting the requirement
+
+    Return a JSON object with this exact structure:
     {{
-      "ride_id": <id>,
-      "score": <1-100>,
-      "reason": "<brief explanation of why this is a good match>"
+    "matches": [
+        {{
+        "ride_id": <id>,
+        "score": <1-100>,
+        "reason": "<brief explanation including traffic considerations>"
+        }}
+    ],
+    "explanation": "<brief overall summary including traffic info>"
     }}
-  ],
-  "explanation": "<brief overall summary>"
-}}
 
-Only include rides with a score of 40 or above. Return at most 5 matches. Return ONLY the JSON, no other text."""
+    Only include rides with a score of 40 or above. Return at most 5 matches. Return ONLY the JSON, no other text."""
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    api_key = os.getenv("GROK_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="AI matching service not configured")
 
-    client = anthropic.Anthropic(api_key=api_key)
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
+    xai_client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+    completion = xai_client.chat.completions.create(
+        model="grok-3-mini",
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
+        extra_body={"search_parameters": {"mode": "auto", "sources": [{"type": "web"}]}},
     )
 
-    # Parse Claude's response
-    content_block = message.content[0]
-    if content_block.type != "text":
-        raise HTTPException(status_code=500, detail="Unexpected AI response format")
-    response_text = content_block.text
+    # Parse Grok's response
+    response_text = completion.choices[0].message.content
+    if not response_text:
+        raise HTTPException(status_code=500, detail="Empty AI response")
     try:
         result = json.loads(response_text)
     except json.JSONDecodeError:

@@ -30,6 +30,10 @@ class PaymentMethods(str, Enum):
     cash = "cash"
     wallet = "wallet"
 
+class PaymentMethodType(str, Enum):
+    mobile_money = "mobile_money"
+    card = "card"
+
 @passenger_router.get(
     "/passenger/ride/search", dependencies=[Depends(has_role(["passenger"]))]
 )
@@ -221,5 +225,153 @@ def review_trip(
     }
     supabase.table("reviews").insert(review_data).execute()
     return {"message": "Review submitted successfully"}
+
+
+@passenger_router.post(
+    "/passenger/wallet/topup", dependencies=[Depends(has_role(["passenger"]))]
+)
+def topup_wallet(
+    current_user: Annotated[User, Depends(get_current_user)],
+    amount: Annotated[float, Form()],
+):
+    if amount <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Amount must be greater than 0",
+        )
+
+    user_id = current_user.id
+
+    # Get current wallet balance
+    wallet = (
+        supabase.table("wallets")
+        .select("*")
+        .eq("user_id", user_id)
+        .execute()
+    )
+
+    if not wallet.data:
+        # Create wallet with initial balance
+        supabase.table("wallets").insert({
+            "user_id": user_id,
+            "balance": amount,
+        }).execute()
+        new_balance = amount
+    else:
+        wallet_data = cast(dict[str, Any], wallet.data[0])
+        new_balance = round(wallet_data["balance"] + amount, 2)
+        supabase.table("wallets").update({"balance": new_balance}).eq(
+            "user_id", user_id
+        ).execute()
+
+    # Record the transaction
+    supabase.table("wallet_transactions").insert({
+        "user_id": user_id,
+        "amount": amount,
+        "transaction_type": "topup",
+    }).execute()
+
+    return {
+        "message": "Wallet topped up successfully",
+        "amount": amount,
+        "new_balance": new_balance,
+    }
+
+
+@passenger_router.get(
+    "/passenger/wallet/balance", dependencies=[Depends(has_role(["passenger"]))]
+)
+def get_wallet_balance(
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    wallet = (
+        supabase.table("wallets")
+        .select("balance")
+        .eq("user_id", current_user.id)
+        .execute()
+    )
+    if not wallet.data:
+        return {"balance": 0.0}
+
+    return {"balance": cast(dict[str, Any], wallet.data[0])["balance"]}
+
+
+@passenger_router.post(
+    "/passenger/payment-methods", dependencies=[Depends(has_role(["passenger"]))]
+)
+def add_payment_method(
+    current_user: Annotated[User, Depends(get_current_user)],
+    method_type: Annotated[PaymentMethodType, Form()],
+    provider: Annotated[str, Form()],
+    account_number: Annotated[str, Form()],
+    account_name: Annotated[str | None, Form()] = None,
+):
+    user_id = current_user.id
+
+    # Check if this payment method already exists
+    existing = (
+        supabase.table("payment_methods")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("method_type", method_type.value)
+        .eq("account_number", account_number)
+        .execute()
+    )
+    if existing.data:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This payment method already exists",
+        )
+
+    payment_method_data = {
+        "user_id": user_id,
+        "method_type": method_type.value,
+        "provider": provider,
+        "account_number": account_number,
+        "account_name": account_name,
+    }
+    supabase.table("payment_methods").insert(payment_method_data).execute()
+
+    return {"message": "Payment method added successfully"}
+
+
+@passenger_router.get(
+    "/passenger/payment-methods", dependencies=[Depends(has_role(["passenger"]))]
+)
+def get_payment_methods(
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    methods = (
+        supabase.table("payment_methods")
+        .select("*")
+        .eq("user_id", current_user.id)
+        .execute()
+    )
+    return {"payment_methods": methods.data}
+
+
+@passenger_router.delete(
+    "/passenger/payment-methods/{method_id}", dependencies=[Depends(has_role(["passenger"]))]
+)
+def delete_payment_method(
+    current_user: Annotated[User, Depends(get_current_user)],
+    method_id: int,
+):
+    # Verify ownership
+    method = (
+        supabase.table("payment_methods")
+        .select("*")
+        .eq("id", method_id)
+        .eq("user_id", current_user.id)
+        .execute()
+    )
+    if not method.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Payment method not found",
+        )
+
+    supabase.table("payment_methods").delete().eq("id", method_id).execute()
+    return {"message": "Payment method deleted successfully"}
 
 
