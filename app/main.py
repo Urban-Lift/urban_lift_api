@@ -16,7 +16,7 @@ origins = [
     "http://localhost:8081",
     "http://localhost:8000",
     "https://urban-lift-api.onrender.com/",
-    "https://urban-lift.netlify.app/",
+    "https://urban-lift.netlify.app",
 ]
 
 app.add_middleware(
