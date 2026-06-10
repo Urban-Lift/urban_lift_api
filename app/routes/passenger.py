@@ -163,18 +163,12 @@ async def book_ride(
     }
     supabase.table("bookings").insert(booking_data).execute()
 
-    # Update available seats
-    new_seats = ride_data["available_seats"] - seats_booked
-    supabase.table("rides").update({"available_seats": new_seats}).eq(
-        "id", ride_id
-    ).execute()
-
-    # Notify the driver about the incoming booking
+    # Notify the driver about the incoming booking request
     supabase.table("notifications").insert({
         "user_id": ride_data["driver_id"],
-        "type": "incoming_ride",
-        "title": "New Ride Booking",
-        "body": f"A passenger booked {seats_booked} seat(s) from {pickup_location} to {dropoff_location}.",
+        "type": "booking_request",
+        "title": "New Booking Request",
+        "body": f"A passenger requested {seats_booked} seat(s) from {pickup_location} to {dropoff_location}.",
         "is_read": False,
     }).execute()
 

@@ -60,7 +60,7 @@ def register_user(
         "is_active": False,
     }
 
-    supabase.table("users").insert(user_created).execute()
+    supabase_admin.table("users").insert(user_created).execute()
 
     return {"message": "User registered successfully"}
 
@@ -68,7 +68,7 @@ def register_user(
 @users_router.post("/users/verify/phone_number")
 def verify_phone_number(phone_number: Annotated[str, Form()]):
     existing_user = (
-        supabase.table("users").select("id").eq("phone_number", phone_number).execute()
+        supabase_admin.table("users").select("id").eq("phone_number", phone_number).execute()
     )
     if not existing_user.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found!")
@@ -81,7 +81,7 @@ def verify_phone_number(phone_number: Annotated[str, Form()]):
     if not is_valid_ghana_number(phone_number):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid Ghana phone number!")
     # need to check if user is active
-    supabase.table("users").select("id, is_active").eq("phone_number", phone_number).eq(
+    supabase_admin.table("users").select("id, is_active").eq("phone_number", phone_number).eq(
         "is_active", False
     ).execute()
     formatted = "+233" + phone_number[1:]
@@ -94,7 +94,7 @@ def verify_phone_number(phone_number: Annotated[str, Form()]):
 @users_router.post("/users/verify/otp")
 def verify_otp(phone_number: Annotated[str, Form()], otp: Annotated[str, Form()]):
     existing_user = (
-        supabase.table("users")
+        supabase_admin.table("users")
         .select("id, role")
         .eq("phone_number", phone_number)
         .execute()
@@ -132,7 +132,7 @@ def verify_otp(phone_number: Annotated[str, Form()], otp: Annotated[str, Form()]
 
     assert response.session is not None
     session = response.session
-    supabase.table("users").update({"is_active": True}).eq(
+    supabase_admin.table("users").update({"is_active": True}).eq(
         "phone_number", phone_number
     ).execute()
     return {

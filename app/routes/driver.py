@@ -546,3 +546,149 @@ def mark_notification_read(
     return {"message": "Notification marked as read"}
 
 
+@drivers_router.get(
+    "/drivers/booking-requests", dependencies=[Depends(has_role(["driver"]))]
+)
+def get_booking_requests(
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """Get all pending booking requests for the driver's rides."""
+    driver_id = current_user.id
+
+    # Get driver's rides
+    rides = (
+        supabase.table("rides")
+        .select("id, pickup_location, dropoff_location, departure_date, departure_time")
+        .eq("driver_id", driver_id)
+        .execute()
+    )
+    rides_data = cast(list[dict[str, Any]], rides.data or [])
+    ride_ids = [r["id"] for r in rides_data]
+
+    if not ride_ids:
+        return {"booking_requests": []}
+
+    ride_map = {r["id"]: r for r in rides_data}
+
+    # Get pending bookings for those rides
+    bookings = (
+        supabase.table("bookings")
+        .select("id, ride_id, passenger_id, seats_booked, total_price, payment_method, pickup_location, dropoff_location, distance_km, duration_min, status, created_at")
+        .in_("ride_id", ride_ids)
+        .eq("status", "pending")
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    bookings_data = cast(list[dict[str, Any]], bookings.data or [])
+    if not bookings_data:
+        return {"booking_requests": []}
+
+    # Get passenger names
+    passenger_ids = list({b["passenger_id"] for b in bookings_data})
+    passengers_data: list[dict[str, Any]] = []
+    if passenger_ids:
+        passengers = (
+            supabase.table("users")
+            .select("auth_id, full_name, profile_pic")
+            .in_("auth_id", passenger_ids)
+            .execute()
+        )
+        passengers_data = cast(list[dict[str, Any]], passengers.data or [])
+    passenger_map = {p["auth_id"]: p for p in passengers_data}
+
+    booking_requests = []
+    for booking in bookings_data:
+        ride = ride_map.get(booking["ride_id"], {})
+        passenger = passenger_map.get(booking["passenger_id"], {})
+        booking_requests.append({
+            "booking_id": booking["id"],
+            "ride_id": booking["ride_id"],
+            "passenger_name": passenger.get("full_name", "Unknown"),
+            "passenger_pic": passenger.get("profile_pic"),
+            "pickup_location": booking["pickup_location"],
+            "dropoff_location": booking["dropoff_location"],
+            "departure_date": ride.get("departure_date"),
+            "departure_time": ride.get("departure_time"),
+            "seats_booked": booking["seats_booked"],
+            "total_price": booking["total_price"],
+            "payment_method": booking["payment_method"],
+            "distance_km": booking["distance_km"],
+            "duration_min": booking["duration_min"],
+            "requested_at": booking["created_at"],
+        })
+
+    return {"booking_requests": booking_requests}
+
+
+@drivers_router.patch(
+    "/drivers/booking-requests/{booking_id}/update", dependencies=[Depends(has_role(["driver"]))]
+)
+def update_booking_request(
+    current_user: Annotated[User, Depends(get_current_user)],
+    booking_id: int,
+    booking_status: Annotated[str, Form()],
+):
+    """Update the status of a pending booking request."""
+    driver_id = current_user.id
+
+    # Get the booking
+    booking = (
+        supabase.table("bookings")
+        .select("*")
+        .eq("id", booking_id)
+        .eq("status", "pending")
+        .execute()
+    )
+    booking_data = cast(list[dict[str, Any]], booking.data or [])
+    if not booking_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking request not found or already processed",
+        )
+
+    booking_record = booking_data[0]
+    ride_id = booking_record["ride_id"]
+
+    # Verify the driver owns this ride
+    ride = (
+        supabase.table("rides")
+        .select("id, available_seats, driver_id")
+        .eq("id", ride_id)
+        .eq("driver_id", driver_id)
+        .execute()
+    )
+    ride_data = cast(list[dict[str, Any]], ride.data or [])
+    if not ride_data:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't own this ride",
+        )
+
+    seats_booked = booking_record["seats_booked"]
+    available = ride_data[0]["available_seats"]
+    if available < seats_booked:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Not enough available seats",
+        )
+
+    # Accept the booking
+    supabase.table("bookings").update({"status": booking_status}).eq("id", booking_id).execute()
+
+    # Update available seats
+    new_seats = available - seats_booked
+    supabase.table("rides").update({"available_seats": new_seats}).eq("id", ride_id).execute()
+
+    # Notify the passenger
+    supabase.table("notifications").insert({
+        "user_id": booking_record["passenger_id"],
+        "type": f"booking_{booking_status}",
+        "title": f"Booking {booking_status.capitalize()}",
+        "body": f"Your booking from {booking_record['pickup_location']} to {booking_record['dropoff_location']} has been {booking_status}.",
+        "is_read": False
+    }).execute()
+
+    return {"message": f"Booking request {booking_status}"}
+
+
