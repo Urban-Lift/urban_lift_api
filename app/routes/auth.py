@@ -364,3 +364,79 @@ def verify_email_otp(
 
     except Exception as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Verification error: {e}")
+
+
+@users_router.post("/users/auth/google")
+def sign_in_with_google(
+    role: Annotated[UserRole, Form()] = UserRole.PASSENGER,
+):
+    """Initiate Google OAuth sign-in. Returns the URL to redirect the user to."""
+    redirect_url = os.getenv("GOOGLE_REDIRECT_URL", "http://localhost:8000/users/auth/google/callback")
+
+    response = supabase.auth.sign_in_with_oauth(
+        {
+            "provider": "google",
+            "options": {
+                "redirect_to": f"{redirect_url}?role={role.value}",
+            },
+        }
+    )
+
+    return {"url": response.url}
+
+
+@users_router.post("/users/auth/google/callback")
+def google_auth_callback(
+    access_token: Annotated[str, Form()],
+    refresh_token: Annotated[str, Form()],
+    role: Annotated[UserRole, Form()] = UserRole.PASSENGER,
+):
+    """Exchange Google OAuth tokens for a session. Creates user record if first login."""
+    try:
+        session_response = supabase.auth.set_session(access_token, refresh_token)
+    except Exception as e:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, f"Invalid tokens: {e}")
+
+    if not session_response.user or not session_response.session:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Failed to authenticate with Google")
+
+    user = session_response.user
+    email = user.email
+
+    # Check if user already exists in our users table
+    existing_user = (
+        supabase.table("users")
+        .select("id, role")
+        .eq("auth_id", user.id)
+        .execute()
+    )
+
+    if not existing_user.data:
+        # First-time Google sign-in — create user record
+        user_data = {
+            "auth_id": user.id,
+            "email": email,
+            "active_mail": True,
+            "role": role.value,
+            "is_active": True,
+            "full_name": user.user_metadata.get("full_name") or user.user_metadata.get("name"),
+            "profile_pic": user.user_metadata.get("avatar_url"),
+        }
+        supabase.table("users").insert(user_data).execute()
+
+        # Set role in user metadata
+        supabase_admin.auth.admin.update_user_by_id(
+            user.id, {"user_metadata": {"role": role.value}}
+        )
+    else:
+        user_role = cast(dict, existing_user.data[0]).get("role")
+        # Ensure metadata stays in sync
+        supabase_admin.auth.admin.update_user_by_id(
+            user.id, {"user_metadata": {"role": user_role}}
+        )
+
+    return {
+        "message": "Google sign-in successful",
+        "access_token": session_response.session.access_token,
+        "refresh_token": session_response.session.refresh_token,
+    }

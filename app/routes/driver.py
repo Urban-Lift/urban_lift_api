@@ -427,3 +427,122 @@ def get_earnings_dashboard(
     }
 
 
+@drivers_router.get(
+    "/drivers/transactions", dependencies=[Depends(has_role(["driver"]))]
+)
+def get_driver_transactions(
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    driver_id = current_user.id
+
+    # Get all completed rides for this driver
+    completed_rides = (
+        supabase.table("rides")
+        .select("id, pickup_location, dropoff_location, departure_date, departure_time")
+        .eq("driver_id", driver_id)
+        .eq("trip_status", "completed")
+        .execute()
+    )
+
+    rides_data = cast(list[dict[str, Any]], completed_rides.data or [])
+    ride_ids = [r["id"] for r in rides_data]
+
+    if not ride_ids:
+        return {"transactions": []}
+
+    ride_map = {r["id"]: r for r in rides_data}
+
+    # Get all completed bookings for those rides
+    bookings = (
+        supabase.table("bookings")
+        .select("id, ride_id, passenger_id, seats_booked, total_price, payment_method, pickup_location, dropoff_location, distance_km, duration_min, created_at")
+        .in_("ride_id", ride_ids)
+        .eq("status", "completed")
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    bookings_data = cast(list[dict[str, Any]], bookings.data or [])
+    if not bookings_data:
+        return {"transactions": []}
+
+    # Get passenger names
+    passenger_ids = list({b["passenger_id"] for b in bookings_data})
+    passengers_data: list[dict[str, Any]] = []
+    if passenger_ids:
+        passengers = (
+            supabase.table("users")
+            .select("auth_id, full_name")
+            .in_("auth_id", passenger_ids)
+            .execute()
+        )
+        passengers_data = cast(list[dict[str, Any]], passengers.data or [])
+    passenger_map = {p["auth_id"]: p["full_name"] for p in passengers_data}
+
+    transactions = []
+    for booking in bookings_data:
+        ride = ride_map.get(booking["ride_id"], {})
+        transactions.append({
+            "booking_id": booking["id"],
+            "ride_id": booking["ride_id"],
+            "passenger_name": passenger_map.get(booking["passenger_id"], "Unknown"),
+            "pickup_location": booking["pickup_location"],
+            "dropoff_location": booking["dropoff_location"],
+            "departure_date": ride.get("departure_date"),
+            "departure_time": ride.get("departure_time"),
+            "seats_booked": booking["seats_booked"],
+            "total_price": booking["total_price"],
+            "payment_method": booking["payment_method"],
+            "distance_km": booking["distance_km"],
+            "duration_min": booking["duration_min"],
+            "date": booking["created_at"],
+        })
+
+    return {"transactions": transactions}
+
+
+@drivers_router.get(
+    "/drivers/notifications", dependencies=[Depends(has_role(["driver"]))]
+)
+def get_driver_notifications(
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    driver_id = current_user.id
+
+    notifications = (
+        supabase.table("notifications")
+        .select("*")
+        .eq("user_id", driver_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    return {"notifications": notifications.data}
+
+
+@drivers_router.patch(
+    "/drivers/notifications/{notification_id}/read", dependencies=[Depends(has_role(["driver"]))]
+)
+def mark_notification_read(
+    current_user: Annotated[User, Depends(get_current_user)],
+    notification_id: int,
+):
+    driver_id = current_user.id
+
+    notification = (
+        supabase.table("notifications")
+        .select("*")
+        .eq("id", notification_id)
+        .eq("user_id", driver_id)
+        .execute()
+    )
+    if not notification.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Notification not found",
+        )
+
+    supabase.table("notifications").update({"is_read": True}).eq("id", notification_id).execute()
+    return {"message": "Notification marked as read"}
+
+

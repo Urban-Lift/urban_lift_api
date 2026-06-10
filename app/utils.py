@@ -14,6 +14,9 @@ import filetype
 load_dotenv()
 
 image_types = ["jpg", "jpeg", "png", "webp"]
+mtn_numbers = ["024", "054", "055", "059", "053", "025"]
+vodafone_numbers = ["020", "050"]
+at_numbers = ["027", "057", "056", "026"]
 
 async def validate_file(
     file: Union[UploadFile, StarletteUploadFile],

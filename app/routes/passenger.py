@@ -16,6 +16,8 @@ from app.dependecies.authz import has_role
 from app.dependecies.authn import get_current_user
 from supabase_auth import User
 from app.routes.rides import TripType
+import hashlib
+from app.utils import is_valid_ghana_number, mtn_numbers, vodafone_numbers, at_numbers
 
 passenger_router = APIRouter(tags=["Passengers"])
 
@@ -30,8 +32,10 @@ class PaymentMethods(str, Enum):
     cash = "cash"
     wallet = "wallet"
 
-class PaymentMethodType(str, Enum):
-    mobile_money = "mobile_money"
+class Provider(str, Enum):
+    mtn_momo = "mtn_momo"
+    vodafone_cash = "vodafone_cash"
+    at_money = "at_money"
     card = "card"
 
 @passenger_router.get(
@@ -164,6 +168,15 @@ async def book_ride(
     supabase.table("rides").update({"available_seats": new_seats}).eq(
         "id", ride_id
     ).execute()
+
+    # Notify the driver about the incoming booking
+    supabase.table("notifications").insert({
+        "user_id": ride_data["driver_id"],
+        "type": "incoming_ride",
+        "title": "New Ride Booking",
+        "body": f"A passenger booked {seats_booked} seat(s) from {pickup_location} to {dropoff_location}.",
+        "is_read": False,
+    }).execute()
 
     return {
         "message": "Ride booked successfully",
@@ -301,20 +314,43 @@ def get_wallet_balance(
 )
 def add_payment_method(
     current_user: Annotated[User, Depends(get_current_user)],
-    method_type: Annotated[PaymentMethodType, Form()],
-    provider: Annotated[str, Form()],
+    provider: Annotated[Provider, Form()],
     account_number: Annotated[str, Form()],
-    account_name: Annotated[str | None, Form()] = None,
+    is_default: Annotated[bool, Form()],
+    is_active: Annotated[bool, Form()],
 ):
     user_id = current_user.id
+    if provider in [Provider.mtn_momo, Provider.vodafone_cash, Provider.at_money]:
+        if not (len(account_number) == 10 and account_number.isdigit()):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid momo number!"
+            )
+
+        if not is_valid_ghana_number(account_number):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid Ghana phone number!")
+        
+        if provider == Provider.mtn_momo and account_number[:3] not in mtn_numbers:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "MTN number must start with one of: " + ", ".join(mtn_numbers))
+        if provider == Provider.vodafone_cash and account_number[:3] not in vodafone_numbers:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Telecel number must start with one of: " + ", ".join(vodafone_numbers))
+        if provider == Provider.at_money and account_number[:3] not in at_numbers:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "at number must start with one of: " + ", ".join(at_numbers))
+        
+    if provider == Provider.card:
+        if not (len(account_number) == 16 and account_number.isdigit()):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid card number!"
+            )
 
     # Check if this payment method already exists
+    salted = f"{os.getenv("JWT_SECRET_KEY")}{account_number}"
+    hash_number = hashlib.sha256(salted.encode()).hexdigest()
     existing = (
         supabase.table("payment_methods")
         .select("*")
         .eq("user_id", user_id)
-        .eq("method_type", method_type.value)
-        .eq("account_number", account_number)
+        .eq("provider", provider.value)
+        .eq("account_number", hash_number)
         .execute()
     )
     if existing.data:
@@ -323,16 +359,136 @@ def add_payment_method(
             detail="This payment method already exists",
         )
 
+    if is_default:
+        default = (
+            supabase.table("payment_methods")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("is_default", True)
+            .execute()
+        )
+        if default.data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="You already have a default payment method. Remove it before setting a new one.",
+            )
+
     payment_method_data = {
         "user_id": user_id,
-        "method_type": method_type.value,
-        "provider": provider,
-        "account_number": account_number,
-        "account_name": account_name,
+        "provider": provider.value,
+        "account_number": hash_number,
+        "last_four": account_number[-4:],
+        "is_default": is_default,
+        "is_active": is_active,
     }
     supabase.table("payment_methods").insert(payment_method_data).execute()
 
     return {"message": "Payment method added successfully"}
+
+@passenger_router.patch(
+    "/passenger/payment-methods", dependencies=[Depends(has_role(["passenger"]))]
+)
+def update_payment_method(
+    current_user: Annotated[User, Depends(get_current_user)],
+    payment_method_id: int,
+    provider: Annotated[Provider | None, Form()] = None,
+    account_number: Annotated[str | None, Form()] = None,
+    is_default: Annotated[bool | None, Form()] = None,
+    is_active: Annotated[bool | None, Form()] = None,
+):
+    user_id = current_user.id
+
+    # Verify ownership
+    method = (
+        supabase.table("payment_methods")
+        .select("*")
+        .eq("payment_method_id", payment_method_id)
+        .eq("user_id", user_id)
+        .execute()
+    )
+    if not method.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Payment method not found",
+        )
+
+    update_data: dict[str, Any] = {}
+
+    if account_number is not None and provider is not None:
+        if provider in [Provider.mtn_momo, Provider.vodafone_cash, Provider.at_money]:
+            if not (len(account_number) == 10 and account_number.isdigit()):
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid momo number!"
+                )
+
+            if not is_valid_ghana_number(account_number):
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid Ghana phone number!")
+
+            if provider == Provider.mtn_momo and account_number[:3] not in mtn_numbers:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "MTN number must start with one of: " + ", ".join(mtn_numbers))
+            if provider == Provider.vodafone_cash and account_number[:3] not in vodafone_numbers:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Telecel number must start with one of: " + ", ".join(vodafone_numbers))
+            if provider == Provider.at_money and account_number[:3] not in at_numbers:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "at number must start with one of: " + ", ".join(at_numbers))
+
+        if provider == Provider.card:
+            if not (len(account_number) == 16 and account_number.isdigit()):
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid card number!"
+                )
+
+        salted = f"{os.getenv("JWT_SECRET_KEY")}{account_number}"
+        hash_number = hashlib.sha256(salted.encode()).hexdigest()
+
+        # Check if this payment method already exists
+        existing = (
+            supabase.table("payment_methods")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("provider", provider.value)
+            .eq("account_number", hash_number)
+            .neq("payment_method_id", payment_method_id)
+            .execute()
+        )
+        if existing.data:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This payment method already exists",
+            )
+
+        update_data["provider"] = provider.value
+        update_data["account_number"] = hash_number
+        update_data["last_four"] = account_number[-4:]
+
+    if is_default is not None:
+        if is_default:
+            default = (
+                supabase.table("payment_methods")
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("is_default", True)
+                .neq("payment_method_id", payment_method_id)
+                .execute()
+            )
+            if default.data:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="You already have a default payment method. Remove it before setting a new one.",
+                )
+        update_data["is_default"] = is_default
+
+    if is_active is not None:
+        update_data["is_active"] = is_active
+
+    if not update_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No fields to update",
+        )
+
+    supabase.table("payment_methods").update(update_data).eq("payment_method_id", payment_method_id).execute()
+
+    return {"message": "Payment method updated successfully"}
 
 
 @passenger_router.get(
@@ -355,13 +511,13 @@ def get_payment_methods(
 )
 def delete_payment_method(
     current_user: Annotated[User, Depends(get_current_user)],
-    method_id: int,
+    payment_method_id: int,
 ):
     # Verify ownership
     method = (
         supabase.table("payment_methods")
         .select("*")
-        .eq("id", method_id)
+        .eq("payment_method_id", payment_method_id)
         .eq("user_id", current_user.id)
         .execute()
     )
@@ -371,7 +527,7 @@ def delete_payment_method(
             detail="Payment method not found",
         )
 
-    supabase.table("payment_methods").delete().eq("id", method_id).execute()
+    supabase.table("payment_methods").delete().eq("payment_method_id", payment_method_id).execute()
     return {"message": "Payment method deleted successfully"}
 
 
@@ -494,5 +650,73 @@ def delete_saved_route(
 
     supabase.table("saved_routes").delete().eq("id", route_id).execute()
     return {"message": "Route deleted successfully"}
+
+
+@passenger_router.get(
+    "/passenger/transactions", dependencies=[Depends(has_role(["passenger"]))]
+)
+def get_passenger_transactions(
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    user_id = current_user.id
+
+    # Get all completed bookings for this passenger
+    bookings = (
+        supabase.table("bookings")
+        .select("id, ride_id, seats_booked, total_price, payment_method, pickup_location, dropoff_location, distance_km, duration_min, status, created_at")
+        .eq("passenger_id", user_id)
+        .eq("status", "completed")
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    bookings_data = cast(list[dict[str, Any]], bookings.data or [])
+    if not bookings_data:
+        return {"transactions": []}
+
+    # Get ride details for driver info
+    ride_ids = list({b["ride_id"] for b in bookings_data})
+    rides = (
+        supabase.table("rides")
+        .select("id, driver_id, departure_date, departure_time")
+        .in_("id", ride_ids)
+        .execute()
+    )
+    rides_data = cast(list[dict[str, Any]], rides.data or [])
+    ride_map = {r["id"]: r for r in rides_data}
+
+    # Get driver names
+    driver_ids = list({r["driver_id"] for r in rides_data if r.get("driver_id")})
+    drivers_data: list[dict[str, Any]] = []
+    if driver_ids:
+        drivers = (
+            supabase.table("users")
+            .select("auth_id, full_name")
+            .in_("auth_id", driver_ids)
+            .execute()
+        )
+        drivers_data = cast(list[dict[str, Any]], drivers.data or [])
+    driver_map = {d["auth_id"]: d["full_name"] for d in drivers_data}
+
+    transactions = []
+    for booking in bookings_data:
+        ride = ride_map.get(booking["ride_id"], {})
+        transactions.append({
+            "booking_id": booking["id"],
+            "ride_id": booking["ride_id"],
+            "driver_name": driver_map.get(ride.get("driver_id", ""), "Unknown"),
+            "pickup_location": booking["pickup_location"],
+            "dropoff_location": booking["dropoff_location"],
+            "departure_date": ride.get("departure_date"),
+            "departure_time": ride.get("departure_time"),
+            "seats_booked": booking["seats_booked"],
+            "total_price": booking["total_price"],
+            "payment_method": booking["payment_method"],
+            "distance_km": booking["distance_km"],
+            "duration_min": booking["duration_min"],
+            "date": booking["created_at"],
+        })
+
+    return {"transactions": transactions}
 
 
