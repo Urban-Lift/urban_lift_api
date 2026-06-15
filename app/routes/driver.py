@@ -16,9 +16,10 @@ from app.dependecies.authz import has_role
 from app.dependecies.authn import get_current_user
 import os
 import re
+import httpx
 from app.routes.rides import RideModel
 from app.routes.auth import UserRole
-from datetime import date, timedelta
+from datetime import date, time, timedelta, datetime
 
 drivers_router = APIRouter(tags=["Drivers"])
 
@@ -162,7 +163,7 @@ def get_ride(
 
 
 @drivers_router.post("/drivers/ride/create", dependencies=[Depends(has_role(["driver"]))])
-def create_ride(
+async def create_ride(
     ride: Annotated[RideModel, Form()],
     current_user: Annotated[User, Depends(get_current_user)],
 ):
@@ -175,13 +176,62 @@ def create_ride(
 
     if not driver.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Driver not found!")
+
+    # Check if driver has an active ride with fully booked seats
+    active_rides = (
+        supabase.table("rides")
+        .select("id, available_seats")
+        .eq("driver_id", driver_id)
+        .in_("trip_status", ["active"])
+        .execute()
+    )
+    active_rides_data = cast(list[dict[str, Any]], active_rides.data or [])
+    for active_ride in active_rides_data:
+        if active_ride["available_seats"] == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="You already have a confirmed ride with all seats booked. Complete it before creating a new one.",
+            )
+
+    if ride.price_per_seat <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Price per seat must be greater than zero")
+    if ride.available_seats <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Available seats must be greater than zero")
+    if not (-90 <= ride.pickup_lat <= 90) or not (-180 <= ride.pickup_lng <= 180) or not (-90 <= ride.dropoff_lat <= 90) or not (-180 <= ride.dropoff_lng <= 180):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid coordinates provided")
+    if ride.departure_date < date.today():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Departure date cannot be in the past")
+
+    # Calculate distance and duration using OSRM
+    osrm_url = "https://router.project-osrm.org/route/v1/driving"
+    coords = f"{ride.pickup_lng},{ride.pickup_lat};{ride.dropoff_lng},{ride.dropoff_lat}"
+    async with httpx.AsyncClient() as client:
+        route_resp = await client.get(
+            f"{osrm_url}/{coords}",
+            params={"overview": "false"},
+        )
+        if route_resp.status_code != 200:
+            raise HTTPException(status_code=502, detail="Routing service unavailable")
+        route_data = route_resp.json()
+        if route_data.get("code") != "Ok" or not route_data.get("routes"):
+            raise HTTPException(status_code=400, detail="No route found between locations")
+
+    route = route_data["routes"][0]
+    distance_km = round(route["distance"] / 1000, 1)
+    duration_min = round(route["duration"] / 60)
+
+    # Calculate estimated arrival time from departure_time + duration
+    departure_dt = datetime.combine(ride.departure_date, ride.departure_time)
+    arrival_dt = departure_dt + timedelta(minutes=duration_min)
+    est_arrival_time = arrival_dt.time()
+
     ride_data = {
         "driver_id": driver_id,
         "pickup_location": ride.pickup_location,
         "dropoff_location": ride.dropoff_location,
         "departure_date": ride.departure_date.isoformat(),
         "departure_time": ride.departure_time.isoformat(),
-        "est_arrival_time": ride.est_arrival_time.isoformat() if ride.est_arrival_time else None,
+        "est_arrival_time": est_arrival_time.isoformat(),
         "available_seats": ride.available_seats,
         "price_per_seat": ride.price_per_seat,
         "trip_type": ride.trip_type.value,
@@ -190,22 +240,17 @@ def create_ride(
         "pickup_lng": ride.pickup_lng,
         "dropoff_lat": ride.dropoff_lat,
         "dropoff_lng": ride.dropoff_lng,
+        "distance_km": distance_km,
+        "duration_min": duration_min,
     }
-    try:
-          
-        if ride.price_per_seat <= 0:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Price per seat must be greater than zero")
-        if ride.available_seats <= 0:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Available seats must be greater than zero")
-        if not (-90 <= ride.pickup_lat <= 90) or not (-180 <= ride.pickup_lng <= 180) or not (-90 <= ride.dropoff_lat <= 90) or not (-180 <= ride.dropoff_lng <= 180):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid coordinates provided")
-        if ride.departure_date < date.today():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Departure date cannot be in the past")
-        
-        supabase.table("rides").insert(ride_data).execute()
-        return {"message": "Ride created successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create ride: {str(e)}")
+
+    supabase.table("rides").insert(ride_data).execute()
+    return {
+        "message": "Ride created successfully",
+        "distance_km": distance_km,
+        "duration_min": duration_min,
+        "est_arrival_time": est_arrival_time.isoformat(),
+    }
 
 
 @drivers_router.post(
@@ -215,7 +260,7 @@ async def driver_car_registration(
     current_user: Annotated[User, Depends(get_current_user)],
     full_name: Annotated[str, Form()],
     phone_number: Annotated[str, Form()],
-    email: Annotated[EmailStr, Form()],
+    
     ghana_card: Annotated[str, Form()],
     license_plate_num: Annotated[str, Form()],
     car_model: Annotated[str, Form()],
@@ -227,6 +272,7 @@ async def driver_car_registration(
     vehicle_insurance: Annotated[UploadFile, File()],
     # car_pic: Annotated[List[UploadFile], File()],
     car_pic: Annotated[UploadFile, File()],
+    email: Annotated[EmailStr | None, Form()] = None,
 ):
     if not (len(phone_number) == 10 and phone_number.isdigit()):
         raise HTTPException(

@@ -49,7 +49,7 @@ class RideModel(BaseModel):
     dropoff_lng: float
     departure_date: date
     departure_time: time
-    est_arrival_time: time
+    # est_arrival_time: time
     available_seats: int
     price_per_seat: float
     trip_type: TripType
@@ -421,6 +421,97 @@ async def get_distance(
             "geometry": route.get("geometry"),
         }
     
+@ride_router.get(
+    "/driver/ride/navigate-to-pickup/{ride_id}",
+    dependencies=[Depends(has_role(["driver"]))],
+)
+async def navigate_to_pickup(
+    current_user: Annotated[User, Depends(get_current_user)],
+    ride_id: int,
+    driver_lat: float,
+    driver_lng: float,
+):
+    ride = (
+        supabase.table("rides")
+        .select("*")
+        .eq("id", ride_id)
+        .eq("driver_id", current_user.id)
+        .execute()
+    )
+    if not ride.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ride not found or you are not the driver",
+        )
+
+    ride_data = cast(dict[str, Any], ride.data[0])
+
+    if ride_data.get("trip_status") != "scheduled":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Navigation to pickup is only available for scheduled rides",
+        )
+
+    pickup_lat = ride_data.get("pickup_lat")
+    pickup_lng = ride_data.get("pickup_lng")
+
+    if not pickup_lat or not pickup_lng:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pickup coordinates not available for this ride",
+        )
+
+    osrm_url = "https://router.project-osrm.org/route/v1/driving"
+    coords = f"{driver_lng},{driver_lat};{pickup_lng},{pickup_lat}"
+
+    async with httpx.AsyncClient() as client:
+        route_resp = await client.get(
+            f"{osrm_url}/{coords}",
+            params={"overview": "full", "geometries": "geojson", "steps": "true"},
+            headers=app_header,
+        )
+        if route_resp.status_code != 200:
+            raise HTTPException(
+                status_code=route_resp.status_code, detail="Routing service error"
+            )
+        route_data = route_resp.json()
+        if route_data.get("code") != "Ok" or not route_data.get("routes"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="No route found to pickup"
+            )
+
+        route = route_data["routes"][0]
+        legs = route.get("legs", [])
+        steps = legs[0].get("steps", []) if legs else []
+
+        # Update driver's current location in the rides table
+        supabase.table("rides").update(
+            {"driver_lat": driver_lat, "driver_lng": driver_lng}
+        ).eq("id", ride_id).execute()
+
+        return {
+            "ride_id": ride_id,
+            "pickup_location": ride_data.get("pickup_location"),
+            "pickup_lat": pickup_lat,
+            "pickup_lng": pickup_lng,
+            "distance_km": round(route["distance"] / 1000, 2),
+            "duration_min": round(route["duration"] / 60, 2),
+            "geometry": route.get("geometry"),
+            "navigation": {
+                "steps": [
+                    {
+                        "instruction": step.get("maneuver", {}).get("type", ""),
+                        "modifier": step.get("maneuver", {}).get("modifier", ""),
+                        "name": step.get("name", ""),
+                        "distance_m": step.get("distance", 0),
+                        "duration_s": step.get("duration", 0),
+                    }
+                    for step in steps
+                ],
+            },
+        }
+
+
 @ride_router.post("/ride/match", dependencies=[Depends(has_role(["passenger"]))])
 async def match_rides(
     current_user: Annotated[User, Depends(get_current_user)],

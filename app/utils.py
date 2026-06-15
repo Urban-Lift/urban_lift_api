@@ -60,12 +60,15 @@ async def validate_file(
 
 
 def is_valid_ghana_number(phone_number: str):
+    valid_prefixes = mtn_numbers + vodafone_numbers + at_numbers
     try:
         parsed = phonenumbers.parse(phone_number, "GH")
         if not phonenumbers.is_valid_number(parsed):
-            return False
-        network = carrier.name_for_number(parsed, "en")
-        return bool(network)
+            national = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.NATIONAL).replace(" ", "")
+            prefix = national[:3]
+            if prefix not in valid_prefixes or len(national) != 10:
+                return False
+        return True
     except NumberParseException:
         return False
     

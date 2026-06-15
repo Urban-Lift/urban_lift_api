@@ -19,7 +19,10 @@ from app.dependecies.authz import has_role
 from app.dependecies.authn import get_current_user
 import os
 import re
+import logging
 from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
 
 users_router = APIRouter(tags=["Users"])
 
@@ -113,11 +116,14 @@ def verify_otp(phone_number: Annotated[str, Form()], otp: Annotated[str, Form()]
     formatted = "+233" + phone_number[1:]
 
     try:
+        logger.info(f"Verifying OTP for phone: {formatted}")
         response = supabase.auth.verify_otp(
             {"phone": formatted, "token": otp, "type": "sms"}
         )
+        logger.info(f"OTP verification response - user: {response.user is not None}, session: {response.session is not None}")
 
     except Exception as e:
+        logger.error(f"OTP verification failed for {formatted}: {type(e).__name__}: {e}")
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Verification error: {e}")
 
     assert response.user is not None
