@@ -180,6 +180,10 @@ async def create_profile(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid Ghana phone number!")
 
     user_id = current_user.id
+
+    existing_profile = supabase.table("users").select("emergency_number").eq("auth_id", user_id).execute()
+    if existing_profile.data:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Profile already exists!")
     # 0239237162
     image_url = None
     try:
@@ -211,8 +215,13 @@ async def create_profile(
     }
     try:
         phone = current_user.phone
+        print(f"Current user phone: {phone}")
         if not phone:
             raise HTTPException(status_code=400, detail="No phone number on account")
+        if phone == emergency_number:
+            raise HTTPException(
+                status_code=400, detail="Emergency number cannot be the same as your phone number"
+            )
         new_phone = "0" + phone[3:]
         supabase.table("users").update(user_profile).eq(
             "phone_number", new_phone

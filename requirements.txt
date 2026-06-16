@@ -12,3 +12,4 @@ gotrue
 httpx
 twilio
 openai
+google-genai

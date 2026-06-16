@@ -15,6 +15,10 @@ from app.routes.auth import UserRole
 import os
 import httpx
 from twilio.rest import Client as TwilioClient
+from google import genai
+
+client = genai.Client()
+
 
 ride_router = APIRouter(tags=["Rides"])
 
@@ -368,12 +372,16 @@ async def geocode_address(
             )
         if response.status_code != 200:
             raise HTTPException(status_code=response.status_code, detail="Reverse geocoding error")
-        return {
-            "message": "Geocoding successful",
-            "lat": response.json()[0]["lat"],
-            "lon": response.json()[0]["lon"],
-            "display_name": response.json()[0]["display_name"],
-        }
+        results = response.json()
+        if not results:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No results found for the given address")
+        else:
+            return {
+                "message": "Geocoding successful",
+                "lat": results[0]["lat"],
+                "lon": results[0]["lon"],
+                "display_name": response.json()[0]["display_name"],
+            }
     
 @ride_router.post("/reverse_geocode")
 async def reverse_geocode(
@@ -532,7 +540,7 @@ async def match_rides(
     query = (
         supabase.table("rides")
         .select("*")
-        .eq("trip_status", "scheduled")
+        .in_("trip_status", ["scheduled", "active"])
         .gte("available_seats", seats_needed)
         .eq("departure_date", departure_date.isoformat())
     )
@@ -541,7 +549,6 @@ async def match_rides(
     if not rides.data:
         return {"matches": [], "explanation": "No available rides found for that date."}
 
-    # Build context for Grok
     rides_json = json.dumps(rides.data, default=str)
 
     prompt = f"""You are a ride-matching assistant for UrbanLift, a carpooling app in Ghana.
@@ -580,24 +587,21 @@ async def match_rides(
 
     Only include rides with a score of 40 or above. Return at most 5 matches. Return ONLY the JSON, no other text."""
 
-    api_key = os.getenv("GROK_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="AI matching service not configured")
 
-    xai_client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
-    completion = xai_client.chat.completions.create(
-        model="grok-3-mini",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-        extra_body={"search_parameters": {"mode": "auto", "sources": [{"type": "web"}]}},
+    
+    response = client.models.generate_content(
+        model="gemini-3.5-flash",
+        contents=prompt
     )
 
-    # Parse Grok's response
-    response_text = completion.choices[0].message.content
-    if not response_text:
+    
+    if not response.text:
         raise HTTPException(status_code=500, detail="Empty AI response")
     try:
-        result = json.loads(response_text)
+        result = json.loads(response.text)
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Failed to parse AI matching response")
 

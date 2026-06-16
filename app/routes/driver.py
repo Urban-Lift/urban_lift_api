@@ -177,21 +177,19 @@ async def create_ride(
     if not driver.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Driver not found!")
 
-    # Check if driver has an active ride with fully booked seats
+    # Check if driver already has an active ride
     active_rides = (
         supabase.table("rides")
-        .select("id, available_seats")
+        .select("id")
         .eq("driver_id", driver_id)
         .in_("trip_status", ["active"])
         .execute()
     )
-    active_rides_data = cast(list[dict[str, Any]], active_rides.data or [])
-    for active_ride in active_rides_data:
-        if active_ride["available_seats"] == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="You already have a confirmed ride with all seats booked. Complete it before creating a new one.",
-            )
+    if active_rides.data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You already have an active ride. Complete it before creating a new one.",
+        )
 
     if ride.price_per_seat <= 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Price per seat must be greater than zero")
@@ -274,6 +272,23 @@ async def driver_car_registration(
     car_pic: Annotated[UploadFile, File()],
     email: Annotated[EmailStr | None, Form()] = None,
 ):
+    existing_driver_data = (
+            supabase.table("driver_car_registration")
+            .select("ghana_card, license_plate_num, email, phone_number")
+            .or_(
+                f"ghana_card.eq.{ghana_card},"
+                f"license_plate_num.eq.{license_plate_num},"
+                f"email.eq.{email},"
+                f"phone_number.eq.{phone_number}"
+            )
+            .execute()
+        )
+    if existing_driver_data.data:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Driver with the same Ghana card, license plate number, email, or phone number already exists.")
+    existing_driver = supabase.table("driver_car_registration").select("auth_id").eq("auth_id", current_user.id).execute()
+    if existing_driver.data:
+        raise HTTPException(status.HTTP_409_CONFLICT, "You have already registered as a driver.")
+    
     if not (len(phone_number) == 10 and phone_number.isdigit()):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid phone number!"
