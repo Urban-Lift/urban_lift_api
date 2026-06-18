@@ -6,19 +6,17 @@ from enum import Enum
 import os
 import json
 import httpx
-from openai import OpenAI
 from app.admin_client import supabase_admin as supabase
 from app.dependecies.authz import has_role
 from app.dependecies.authn import get_current_user
 from supabase_auth import User
-from app.routes.auth import UserRole
 import os
 import httpx
 from twilio.rest import Client as TwilioClient
 from google import genai
 
-client = genai.Client()
 
+client = genai.Client()
 
 ride_router = APIRouter(tags=["Rides"])
 
@@ -104,7 +102,6 @@ async def track_ride(
     response: dict[str, Any] = {
         "booking": booking_data,
         "ride": ride_data,
-        "status": booking_data.get("status"),
         "driver_lat": ride_data.get("driver_lat"),
         "driver_lng": ride_data.get("driver_lng"),
     }
@@ -454,10 +451,10 @@ async def navigate_to_pickup(
 
     ride_data = cast(dict[str, Any], ride.data[0])
 
-    if ride_data.get("trip_status") != "scheduled":
+    if ride_data.get("trip_status") != "active":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Navigation to pickup is only available for scheduled rides",
+            detail="Navigation to pickup is only available for active rides",
         )
 
     pickup_lat = ride_data.get("pickup_lat")
@@ -518,7 +515,6 @@ async def navigate_to_pickup(
                 ],
             },
         }
-
 
 @ride_router.post("/ride/match", dependencies=[Depends(has_role(["passenger"]))])
 async def match_rides(

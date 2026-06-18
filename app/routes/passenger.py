@@ -23,9 +23,6 @@ passenger_router = APIRouter(tags=["Passengers"])
 
 class RideStatus(str, Enum):
     pending = "pending"
-    confirmed = "confirmed"
-    in_progress = "in_progress"
-    completed = "completed"
     cancelled = "cancelled"
 class PaymentMethods(str, Enum):
     mobile_money = "mobile_money"
@@ -713,4 +710,51 @@ def get_passenger_transactions(
 
     return {"transactions": transactions}
 
+
+@passenger_router.patch(
+    "/passenger/ride/{ride_id}/status", dependencies=[Depends(has_role(["passenger"]))]
+)
+def update_ride_status(
+    ride_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    trip_status: Annotated[RideStatus, Form()],
+):
+    valid_statuses = {"pending", "cancelled"}
+    if trip_status not in valid_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}",
+        )
+
+    # Verify the passenger has a booking on this ride
+    passenger_id = current_user.id
+    booking = (
+        supabase.table("bookings")
+        .select("id")
+        .eq("ride_id", ride_id)
+        .eq("passenger_id", passenger_id)
+        .in_("status", ["accepted", "cancelled", "pending"])
+        .execute()
+    )
+    if not booking.data:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have an accepted booking on this ride",
+        )
+
+    ride = (
+        supabase.table("rides")
+        .select("id, trip_status")
+        .eq("id", ride_id)
+        .execute()
+    )
+    if not ride.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ride not found",
+        )
+
+    supabase.table("bookings").update({"status": trip_status}).eq("id", ride_id).execute()
+
+    return {"message": f"Ride status updated to {trip_status}"}
 

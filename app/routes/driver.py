@@ -20,8 +20,13 @@ import httpx
 from app.routes.rides import RideModel
 from app.routes.auth import UserRole
 from datetime import date, time, timedelta, datetime
+from enum import Enum
 
 drivers_router = APIRouter(tags=["Drivers"])
+
+class BookingStatus(str, Enum):
+    accepted = "accepted"
+    ignored = "ignored"
 
 
 url = os.getenv("SUPABASE_URL")
@@ -102,6 +107,62 @@ def update_ride(
 
     try:
         supabase.table("rides").update(ride_data).eq("id", ride_id).eq("driver_id", driver_id).execute()
+
+        # When trip is marked as completed, update all accepted bookings to completed
+        # so the earnings are reflected in the driver's dashboard
+        if trip_status == "completed":
+            # Check if earnings already recorded for this ride
+            existing_earning = (
+                supabase.table("driver_earnings")
+                .select("id, earned_at")
+                .eq("driver_id", driver_id)
+                .eq("ride_id", ride_id)
+                .execute()
+            )
+
+            # Update accepted bookings to completed
+            supabase.table("bookings").update(
+                {"status": "completed", "payment_made": True}
+            ).eq("ride_id", ride_id).eq("status", "accepted").execute()
+
+            # Get all bookings for this ride (accepted or already completed)
+            completed_bookings = (
+                supabase.table("bookings")
+                .select("id, passenger_id, pickup_location, dropoff_location, total_price")
+                .eq("ride_id", ride_id)
+                .eq("status", "completed")
+                .execute()
+            )
+
+            bookings_list = cast(list[dict[str, Any]], completed_bookings.data or [])
+            ride_total = sum(float(b.get("total_price", 0) or 0) for b in bookings_list)
+
+            if existing_earning.data:
+                # Earnings record exists — fix null earned_at if needed
+                record = cast(dict[str, Any], existing_earning.data[0])
+                if not record.get("earned_at"):
+                    supabase.table("driver_earnings").update({
+                        "earned_at": datetime.now().isoformat(),
+                    }).eq("id", record["id"]).execute()
+            elif ride_total > 0:
+                # No earnings record yet — insert one
+                supabase.table("driver_earnings").insert({
+                    "driver_id": driver_id,
+                    "ride_id": ride_id,
+                    "amount": round(ride_total, 2),
+                    "earned_at": datetime.now().isoformat(),
+                }).execute()
+
+            # Notify passengers to leave a review
+            for booking in bookings_list:
+                supabase.table("notifications").insert({
+                    "user_id": booking["passenger_id"],
+                    "type": "review_request",
+                    "title": "Trip Completed - Leave a Review",
+                    "body": f"Your trip from {booking['pickup_location']} to {booking['dropoff_location']} is complete. Please leave a review for your driver!",
+                    "is_read": False,
+                }).execute()
+
         return {"message": "Ride updated successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update ride: {str(e)}")
@@ -406,86 +467,81 @@ def get_earnings_dashboard(
     today = date.today()
     week_start = today - timedelta(days=today.weekday())
     month_start = today.replace(day=1)
+    year_start = today.replace(month=1, day=1)
 
-    # Get all completed rides for this driver
-    completed_rides = (
-        supabase.table("rides")
-        .select("id, departure_date")
+    # Get all earning records from driver_earnings table
+    earnings = (
+        supabase.table("driver_earnings")
+        .select("amount, earned_at, created_at")
         .eq("driver_id", driver_id)
-        .eq("trip_status", "completed")
         .execute()
     )
 
-    rides_data = cast(list[dict[str, Any]], completed_rides.data or [])
-    ride_ids = [r["id"] for r in rides_data]
+    earnings_data = cast(list[dict[str, Any]], earnings.data or [])
 
-    if not ride_ids:
+    if not earnings_data:
         return {
             "total_earnings": 0.0,
-            "today_earnings": 0.0,
-            "week_earnings": 0.0,
-            "month_earnings": 0.0,
+            "yearly_earnings": 0.0,
+            "monthly_earnings": 0.0,
+            "weekly_earnings": 0.0,
+            "daily_earnings": 0.0,
             "total_rides": 0,
-            "today_rides": 0,
-            "week_rides": 0,
-            "month_rides": 0,
         }
 
-    # Get all completed bookings for those rides
-    bookings = (
-        supabase.table("bookings")
-        .select("total_price, ride_id, status")
-        .in_("ride_id", ride_ids)
-        .eq("status", "completed")
+    total_earnings = 0.0
+    yearly_earnings = 0.0
+    monthly_earnings = 0.0
+    weekly_earnings = 0.0
+    daily_earnings = 0.0
+
+    for record in earnings_data:
+        amount = float(record.get("amount", 0) or 0)
+        earned_at_str = record.get("earned_at") or record.get("created_at")
+        total_earnings += amount
+
+        if earned_at_str:
+            earned_date = datetime.fromisoformat(earned_at_str.replace("Z", "+00:00")).date()
+            if earned_date >= year_start:
+                yearly_earnings += amount
+            if earned_date >= month_start:
+                monthly_earnings += amount
+            if earned_date >= week_start:
+                weekly_earnings += amount
+            if earned_date == today:
+                daily_earnings += amount
+
+    result = {
+        "total_earnings": round(total_earnings, 2),
+        "yearly_earnings": round(yearly_earnings, 2),
+        "monthly_earnings": round(monthly_earnings, 2),
+        "weekly_earnings": round(weekly_earnings, 2),
+        "daily_earnings": round(daily_earnings, 2),
+        "total_rides": len(earnings_data),
+    }
+
+    # Update the driver_earnings_summary table with computed values
+    existing_summary = (
+        supabase.table("driver_earnings")
+        .select("id")
+        .eq("driver_id", driver_id)
         .execute()
     )
-
-    bookings_data = cast(list[dict[str, Any]], bookings.data or [])
-
-    # Build a map of ride_id -> departure_date
-    ride_dates: dict[int, str] = {}
-    for ride in rides_data:
-        ride_dates[ride["id"]] = ride["departure_date"]
-
-    total_earnings = 0.0
-    today_earnings = 0.0
-    week_earnings = 0.0
-    month_earnings = 0.0
-    today_rides: set[int] = set()
-    week_rides: set[int] = set()
-    month_rides: set[int] = set()
-
-    for booking in bookings_data:
-        price = float(booking.get("total_price", 0) or 0)
-        ride_id = booking["ride_id"]
-        ride_date_str = ride_dates.get(ride_id)
-        if not ride_date_str:
-            continue
-
-        ride_date = date.fromisoformat(ride_date_str)
-
-        total_earnings += price
-
-        if ride_date == today:
-            today_earnings += price
-            today_rides.add(ride_id)
-        if ride_date >= week_start:
-            week_earnings += price
-            week_rides.add(ride_id)
-        if ride_date >= month_start:
-            month_earnings += price
-            month_rides.add(ride_id)
-
-    return {
-        "total_earnings": round(total_earnings, 2),
-        "today_earnings": round(today_earnings, 2),
-        "week_earnings": round(week_earnings, 2),
-        "month_earnings": round(month_earnings, 2),
-        "total_rides": len(ride_ids),
-        "today_rides": len(today_rides),
-        "week_rides": len(week_rides),
-        "month_rides": len(month_rides),
+    summary_data = {
+        "driver_id": driver_id,
+        "total_earnings": result["total_earnings"],
+        "yearly_earnings": result["yearly_earnings"],
+        "monthly_earnings": result["monthly_earnings"],
+        "weekly_earnings": result["weekly_earnings"],
+        "daily_earnings": result["daily_earnings"],
+        "total_rides": result["total_rides"]
     }
+    if existing_summary.data:
+        supabase.table("driver_earnings").update(summary_data).eq("driver_id", driver_id).execute()
+    else:
+        supabase.table("driver_earnings").insert(summary_data).execute()
+
+    return result
 
 
 @drivers_router.get(
@@ -631,12 +687,12 @@ def get_booking_requests(
 
     ride_map = {r["id"]: r for r in rides_data}
 
-    # Get pending bookings for those rides
+    # Get pending and accepted bookings for those rides
     bookings = (
         supabase.table("bookings")
         .select("id, ride_id, passenger_id, seats_booked, total_price, payment_method, pickup_location, dropoff_location, distance_km, duration_min, status, created_at")
         .in_("ride_id", ride_ids)
-        .eq("status", "pending")
+        .in_("status", ["pending", "accepted"])
         .order("created_at", desc=True)
         .execute()
     )
@@ -676,6 +732,7 @@ def get_booking_requests(
             "payment_method": booking["payment_method"],
             "distance_km": booking["distance_km"],
             "duration_min": booking["duration_min"],
+            "status": booking["status"],
             "requested_at": booking["created_at"],
         })
 
@@ -688,10 +745,15 @@ def get_booking_requests(
 def update_booking_request(
     current_user: Annotated[User, Depends(get_current_user)],
     booking_id: int,
-    booking_status: Annotated[str, Form()],
+    booking_status: Annotated[BookingStatus, Form()],
 ):
     """Update the status of a pending booking request."""
     driver_id = current_user.id
+    if booking_status not in BookingStatus:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid booking status. Must be one of: {[status.value for status in BookingStatus]}",
+        )
 
     # Get the booking
     booking = (
@@ -735,7 +797,7 @@ def update_booking_request(
         )
 
     # Accept the booking
-    supabase.table("bookings").update({"status": booking_status}).eq("id", booking_id).execute()
+    supabase.table("bookings").update({"status": booking_status.value}).eq("id", booking_id).execute()
 
     # Update available seats
     new_seats = available - seats_booked
@@ -744,12 +806,10 @@ def update_booking_request(
     # Notify the passenger
     supabase.table("notifications").insert({
         "user_id": booking_record["passenger_id"],
-        "type": f"booking_{booking_status}",
-        "title": f"Booking {booking_status.capitalize()}",
-        "body": f"Your booking from {booking_record['pickup_location']} to {booking_record['dropoff_location']} has been {booking_status}.",
+        "type": f"booking_{booking_status.value}",
+        "title": f"Booking {booking_status.value.capitalize()}",
+        "body": f"Your booking from {booking_record['pickup_location']} to {booking_record['dropoff_location']} has been {booking_status.value}.",
         "is_read": False
     }).execute()
 
     return {"message": f"Booking request {booking_status}"}
-
-
